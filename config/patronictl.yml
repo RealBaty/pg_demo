@@ -1,0 +1,4 @@
+scope: pg-ha-demo
+namespace: /service/
+etcd:
+  hosts: etcd-1:2379,etcd-2:2379,etcd-3:2379
