@@ -110,42 +110,6 @@ wait_for_primary() {
     return 1
 }
 
-wait_for_primary_change() {
-    local old_primary="$1"
-    local primary=""
-    for _ in $(seq 1 60); do
-        primary="$(current_primary || true)"
-        if [[ -n "$primary" && "$primary" != "null" && "$primary" != "$old_primary" ]]; then
-            echo "$primary"
-            return 0
-        fi
-        sleep 2
-    done
-    return 1
-}
-
-wait_for_write_endpoint() {
-    for _ in $(seq 1 60); do
-        if run_client_cmd "psql -X -qAt \"\$DEMO_WRITE_URL\" -c 'SELECT pg_is_in_recovery();' | grep -qx f" >/dev/null 2>&1; then
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
-}
-
-start_ha_writer() {
-    run_client_cmd "if [ -f /tmp/ha_writer.pid ]; then kill \"\$(cat /tmp/ha_writer.pid)\" >/dev/null 2>&1 || true; fi; rm -f /tmp/ha_writer.log /tmp/ha_writer.pid; nohup bash /demo/scripts/ha_writer_loop.sh >/tmp/ha_writer.log 2>&1 & echo \$! >/tmp/ha_writer.pid"
-}
-
-stop_ha_writer() {
-    run_client_cmd "if [ -f /tmp/ha_writer.pid ]; then kill \"\$(cat /tmp/ha_writer.pid)\" >/dev/null 2>&1 || true; rm -f /tmp/ha_writer.pid; fi; pkill -f '[h]a_writer_loop.sh' >/dev/null 2>&1 || true"
-}
-
-tail_ha_writer() {
-    run_client_cmd "test -f /tmp/ha_writer.log && tail -n ${1:-12} /tmp/ha_writer.log || true"
-}
-
 cmd_up() {
     check_docker
     section "Starting fully containerized demo stack"
@@ -185,140 +149,23 @@ cmd_status() {
     run_client_script scripts/status.sh
 }
 
-cmd_live() {
+cmd_demo_session() {
     check_docker
     if [[ ! -t 0 ]]; then
-        die "Live demo нужен интерактивный терминал."
+        die "Demo нужен интерактивный терминал."
     fi
 
-    case "${1:-}" in
-        2)
-            local flags=()
-            while IFS= read -r flag; do
-                [[ -n "$flag" ]] && flags+=("$flag")
-            done < <(client_env_args)
-            "${COMPOSE[@]}" exec "${flags[@]}" client bash /demo/scripts/live2_tmux.sh
-            ;;
-        *)
-            die "Unknown live demo: ${1:-}. Сейчас доступно только: ./demo.sh live 2"
-            ;;
-    esac
-}
+    [[ "${1:-}" =~ ^[1-7]$ ]] || die "Unknown demo: ${1:-}. Use 1..7."
 
-demo_failover() {
-    check_docker
-    section "Demo 5: высокая доступность и failover"
-
-    local old_primary="" new_primary=""
-    cleanup_failover() {
-        stop_ha_writer >/dev/null 2>&1 || true
-        if [[ -n "$old_primary" ]]; then
-            "${COMPOSE[@]}" start "$old_primary" >/dev/null 2>&1 || true
-        fi
-    }
-    trap cleanup_failover EXIT
-
-    old_primary="$(wait_for_primary)" || die "Не найден текущий primary."
-    echo "Current primary: ${old_primary}"
-
-    section "Starting write-loop through common endpoint"
-    start_ha_writer
-    sleep 4
-    tail_ha_writer 10
-
-    confirm "Остановить текущий primary ${old_primary} для демонстрации failover?" || die "Failover demo отменена."
-
-    section "Stopping ${old_primary}"
-    "${COMPOSE[@]}" stop "$old_primary"
-
-    section "Waiting for new primary"
-    new_primary="$(wait_for_primary_change "$old_primary")" || die "Новый primary не появился в ожидаемое время."
-    echo "New primary: ${new_primary}"
-
-    section "Waiting for write endpoint to recover"
-    wait_for_write_endpoint || die "Write endpoint не восстановился после failover."
-
-    section "Cluster status after failover"
-    run_client_script scripts/status.sh
-
-    section "Writer log around failover"
-    tail_ha_writer 20
-
-    section "Recent HA writes"
-    run_client_cmd "psql -X -v ON_ERROR_STOP=1 \"\$DEMO_WRITE_URL\" -c \"SELECT id, value, created_at FROM ha_demo ORDER BY id DESC LIMIT 5;\""
-
-    section "Starting old primary back as a replica"
-    "${COMPOSE[@]}" start "$old_primary"
-    sleep 8
-    run_client_script scripts/status.sh
-
-    stop_ha_writer
-    trap - EXIT
-
-    section "Вывод"
-    echo "После короткого разрыва Patroni выбрал новый primary, а запись продолжилась через тот же endpoint."
-}
-
-demo_cap() {
-    check_docker
-    section "Demo 6: CAP через потерю quorum в etcd"
-
-    wait_for_primary >/dev/null || die "Не найден primary перед CAP demo."
-    run_client_script scripts/status.sh
-
-    confirm "Остановить etcd-2 и etcd-3, чтобы потерять quorum?" || die "CAP demo отменена."
-
-    restore_etcd() {
-        "${COMPOSE[@]}" start etcd-2 etcd-3 >/dev/null 2>&1 || true
-    }
-    trap 'restore_etcd' EXIT
-
-    section "Stopping two etcd nodes"
-    "${COMPOSE[@]}" stop etcd-2 etcd-3
-
-    section "Patroni view after quorum loss"
-    set +e
-    run_client_script scripts/status.sh
-    set -e
-
-    section "Waiting past Patroni TTL"
-    sleep 14
-
-    section "Trying write through common endpoint"
-    set +e
-    run_client_cmd "PGCONNECT_TIMEOUT=3 timeout 10s psql -X -v ON_ERROR_STOP=1 \"\$DEMO_WRITE_URL\" -c \"INSERT INTO ha_demo(value) VALUES ('after etcd quorum loss');\""
-    local write_rc=$?
-    set -e
-    if (( write_rc == 0 )); then
-        echo "Запись прошла: фиксируем фактическое поведение стенда до истечения/после восстановления lock."
-    else
-        echo "Запись недоступна: кластер ограничил availability, чтобы не рисковать split-brain."
-    fi
-
-    section "Restoring etcd quorum"
-    restore_etcd
-    trap - EXIT
-    wait_for_primary >/dev/null || die "Primary не восстановился после возврата quorum."
-    section "Waiting for write endpoint to recover"
-    wait_for_write_endpoint || die "Write endpoint не восстановился после возврата quorum."
-    sleep 8
-    run_client_script scripts/status.sh
-
-    section "Вывод"
-    echo "При проблемах с quorum система выбирает консистентность лидерства, даже если запись временно теряет доступность."
+    local flags=()
+    while IFS= read -r flag; do
+        [[ -n "$flag" ]] && flags+=("$flag")
+    done < <(client_env_args)
+    "${COMPOSE[@]}" exec "${flags[@]}" client bash /demo/scripts/tmux_demo.sh "$1"
 }
 
 run_demo() {
-    case "${1:-}" in
-        1) run_client_script scripts/demo1_status.sh ;;
-        2) run_client_script scripts/demo2_isolation.sh ;;
-        3) run_client_script scripts/demo3_locks.sh ;;
-        4) run_client_script scripts/demo4_load.sh ;;
-        5) demo_failover ;;
-        6) demo_cap ;;
-        7) run_client_script scripts/demo7_pacelc.sh ;;
-        *) die "Unknown demo number: ${1:-}. Use 1..7." ;;
-    esac
+    cmd_demo_session "${1:-}"
 }
 
 cmd_all() {
@@ -337,14 +184,12 @@ Usage:
   ./demo.sh up              build/start stack, bootstrap demo DB
   ./demo.sh status          Patroni, endpoints, PgBouncer pools
   ./demo.sh demo <1..7>     run a single demo
-  ./demo.sh live 2          run interactive two-session isolation demo
-  ./demo.sh all             run full class flow
+  ./demo.sh all             run all demos one by one
   ./demo.sh down            stop containers, keep volumes
   ./demo.sh reset           stop containers and delete volumes
 
 Useful env:
-  DEMO_PAUSE=0              skip step pauses
-  DEMO_YES=1                auto-confirm failover/CAP/reset prompts
+  DEMO_YES=1                auto-confirm reset prompt
   PGBENCH_TIME=5            shorten load tests
 EOF
 }
@@ -358,7 +203,6 @@ PostgreSQL HA Demo
 2) status
 3) demo 1: cluster state and routing
 4) demo 2: isolation levels
-L) live 2: interactive isolation demo
 5) demo 3: locks and consistency
 6) demo 4: scale and load
 7) demo 5: HA failover
@@ -375,7 +219,6 @@ EOF
             2) cmd_status ;;
             3) run_demo 1 ;;
             4) run_demo 2 ;;
-            l|L) cmd_live 2 ;;
             5) run_demo 3 ;;
             6) run_demo 4 ;;
             7) run_demo 5 ;;
@@ -395,7 +238,7 @@ case "${1:-}" in
     up) cmd_up ;;
     status) cmd_status ;;
     demo) run_demo "${2:-}" ;;
-    live) cmd_live "${2:-}" ;;
+    live) cmd_demo_session "${2:-}" ;;
     all) cmd_all ;;
     down) cmd_down ;;
     reset) cmd_reset ;;

@@ -14,4 +14,4 @@ printf 'read endpoint pg_is_in_recovery():  '
 psql_demo_read -qAt -c "SELECT pg_is_in_recovery();"
 
 section "PgBouncer pools"
-psql -X "postgresql://demo:demo@pgbouncer-write:6432/pgbouncer" -c "SHOW POOLS;"
+pgbouncer_pools_compact

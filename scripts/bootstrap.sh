@@ -7,7 +7,7 @@ section "Bootstrap demo databases"
 
 step "Waiting for write endpoint"
 for attempt in $(seq 1 90); do
-    if psql -X "$ADMIN_URL" -qAt -c "SELECT 1" >/dev/null 2>&1; then
+    if psql -X -P pager=off "$ADMIN_URL" -qAt -c "SELECT 1" >/dev/null 2>&1; then
         break
     fi
     if [[ "$attempt" == "90" ]]; then
@@ -43,7 +43,7 @@ step "Applying demo schema"
 psql_demo_direct -f /demo/sql/bootstrap_demo.sql
 
 step "Preparing pgbench database"
-if psql -X "$BENCH_DIRECT_URL" -qAt -c "SELECT to_regclass('public.pgbench_accounts') IS NOT NULL" | grep -q '^t$'; then
+if psql -X -P pager=off "$BENCH_DIRECT_URL" -qAt -c "SELECT to_regclass('public.pgbench_accounts') IS NOT NULL" | grep -q '^t$'; then
     echo "pgbench schema already exists."
 else
     pgbench -i -s "$PGBENCH_SCALE" "$BENCH_DIRECT_URL"

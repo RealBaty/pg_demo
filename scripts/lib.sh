@@ -28,23 +28,42 @@ pause_step() {
 }
 
 psql_admin() {
-    psql -X -v ON_ERROR_STOP=1 "$ADMIN_URL" "$@"
+    psql -X -P pager=off -v ON_ERROR_STOP=1 "$ADMIN_URL" "$@"
 }
 
 psql_demo_direct() {
-    psql -X -v ON_ERROR_STOP=1 "$DEMO_DIRECT_URL" "$@"
+    psql -X -P pager=off -v ON_ERROR_STOP=1 "$DEMO_DIRECT_URL" "$@"
 }
 
 psql_demo_write() {
-    psql -X -v ON_ERROR_STOP=1 "$DEMO_WRITE_URL" "$@"
+    psql -X -P pager=off -v ON_ERROR_STOP=1 "$DEMO_WRITE_URL" "$@"
 }
 
 psql_demo_read() {
-    psql -X -v ON_ERROR_STOP=1 "$DEMO_READ_URL" "$@"
+    psql -X -P pager=off -v ON_ERROR_STOP=1 "$DEMO_READ_URL" "$@"
 }
 
 patroni_list() {
     patronictl -c "$PATRONICTL_CONFIG" list
+}
+
+pgbouncer_pools_compact() {
+    psql -X -P pager=off -P footer=off -A -F $'\t' \
+        "postgresql://demo:demo@pgbouncer-write:6432/pgbouncer" \
+        -c "SHOW POOLS;" |
+        awk -F '\t' '
+            NR == 1 {
+                for (i = 1; i <= NF; i++) col[$i] = i
+                printf "%-10s %-10s %6s %7s %6s %7s %7s %4s %-11s\n", "db", "user", "cl_act", "cl_wait", "sv_act", "sv_idle", "sv_used", "wait", "mode"
+                printf "%-10s %-10s %6s %7s %6s %7s %7s %4s %-11s\n", "----------", "----------", "------", "-------", "------", "-------", "-------", "----", "-----------"
+                next
+            }
+            NF > 1 {
+                printf "%-10s %-10s %6s %7s %6s %7s %7s %4s %-11s\n", \
+                    $col["database"], $col["user"], $col["cl_active"], $col["cl_waiting"], \
+                    $col["sv_active"], $col["sv_idle"], $col["sv_used"], $col["maxwait"], $col["pool_mode"]
+            }
+        '
 }
 
 reset_core_demo_data() {

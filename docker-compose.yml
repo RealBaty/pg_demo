@@ -177,11 +177,13 @@ services:
       DEMO_READ_URL: postgresql://demo:demo@pgbouncer-read:6432/demo
       BENCH_DIRECT_URL: postgresql://demo:demo@haproxy:5000/bench
       BENCH_URL: postgresql://demo:demo@pgbouncer-write:6432/bench
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-pgha-demo}
       PGBENCH_TIME: ${PGBENCH_TIME:-20}
       PGBENCH_SCALE: ${PGBENCH_SCALE:-5}
       DEMO_PAUSE: ${DEMO_PAUSE:-1}
     volumes:
       - .:/demo:ro
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
     depends_on:
       - pgbouncer-write
       - pgbouncer-read
